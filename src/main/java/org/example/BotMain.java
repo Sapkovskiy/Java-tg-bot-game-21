@@ -7,15 +7,11 @@ import org.telegram.telegrambots.meta.api.objects.Update;
 import org.telegram.telegrambots.meta.exceptions.TelegramApiException;
 import org.telegram.telegrambots.updatesreceivers.DefaultBotSession;
 
-import java.util.Random;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ConcurrentHashMap;
 
 public class BotMain extends TelegramLongPollingBot {
-
-    int playerScore;
-    int dealerScore;
-    boolean isPlaying;
-    int[] deck;
-    int currentCard;
+    private final ConcurrentHashMap<Long, GameSession> sessions = new ConcurrentHashMap<>();
 
     public static void main(String[] args) throws TelegramApiException {
         TelegramBotsApi telegramBotsApi = new TelegramBotsApi(DefaultBotSession.class);
@@ -23,78 +19,71 @@ public class BotMain extends TelegramLongPollingBot {
         System.out.println("Bot started");
     }
 
-    static int[] buildDeck() {
-        int[] deck = new int[36];
-
-        for (int i = 1; i <= 9; i++) {
-            for (int j = 1; j <= 4; j++) {
-                int currentElement = new Random().nextInt(deck.length);
-                while (deck[currentElement] != 0) {
-                    currentElement = new Random().nextInt(deck.length);
-                }
-                deck[currentElement] = i;
-            }
-        }
-        return deck;
-    }
-
-    void initGame() {
-        isPlaying = false;
-        deck = buildDeck();
-        currentCard = 0;
-        playerScore = 0;
-        dealerScore = 0;
+    private GameSession getSession(Long chatId) {
+        return sessions.computeIfAbsent(chatId, id -> new GameSession());
     }
 
     @Override
     public void onUpdateReceived(Update update) {
-        String chatId = update.getMessage().getChatId().toString();
-        String textUsers = update.getMessage().getText();
-        System.out.println(textUsers);
+        CompletableFuture.runAsync(() -> processUpdate(update));
+    }
 
-        if (textUsers.equals("/start")) {
-            sendMsg(chatId, "Привет! Добро пожаловать в игру 21!");
-            sendMsg(chatId, "Взять карту д/н? (y/n)");
-            initGame();
-            isPlaying = true;
-        }
-        if (!isPlaying) {
-            sendMsg(chatId, "Чтобы начать игру введите /start");
+    private void processUpdate(Update update) {
+        if (!update.hasMessage() || !update.getMessage().hasText()) {
             return;
         }
-        if (textUsers.equals("y") || textUsers.equals("д")) {
-            playerScore += deck[currentCard++];
-            if (playerScore > 21) {
-                while (dealerScore < 17){
-                    dealerScore += deck[currentCard++];
-                }
-                isPlaying = false;
+        Long chatId = update.getMessage().getChatId();
+        String textUsers = update.getMessage().getText();
+
+        GameSession session = getSession(chatId);
+
+        if ("/start".equals(textUsers)) {
+            session.initGame();
+            sendMsg(chatId, "Привет! Добро пожаловать в игру 21!");
+            sendMsg(chatId, "Взять карту д/н? (y/n)");
+            session.isPlaying = true;
+            return;
+        }
+
+        if (!session.isPlaying) {
+            sendMsg(chatId, "Чтобы начать игру, введите /start");
+            return;
+        }
+
+        if ("y".equalsIgnoreCase(textUsers) || "д".equalsIgnoreCase(textUsers)) {
+            session.playerScore += session.deck[session.currentCard++];
+            sendMsg(chatId, "Ваш счёт: " + session.playerScore);
+            if (session.playerScore > 21) {
+                endGame(chatId, session);
+                return;
             }
-            sendMsg(chatId, "Ваш счёт: " + playerScore);
             sendMsg(chatId, "Взять карту д/н? (y/n)");
         }
-        if (textUsers.equals("n") || textUsers.equals("н")) {
+
+        if ("n".equalsIgnoreCase(textUsers) || "н".equalsIgnoreCase(textUsers)) {
             sendMsg(chatId, "Ход крупье . . .");
-            while (dealerScore < 17) {
-                dealerScore += deck[currentCard++];
+            while (session.dealerScore < 17) {
+                session.dealerScore += session.deck[session.currentCard++];
             }
-            isPlaying = false;
-        }
-        if (!isPlaying) {
-            String scoreMessage = "Ваш счёт: " + playerScore + " Счёт крупье: " + dealerScore;
-            if (dealerScore > 21 || playerScore <= 21 && playerScore > dealerScore) {
-                sendMsg(chatId, "Вы победили!" + scoreMessage);
-            } else if (dealerScore == playerScore) {
-                sendMsg(chatId, "Ничья!" + scoreMessage);
-            } else {
-                sendMsg(chatId, "Победил крупье!" + scoreMessage);
-            }
-            sendMsg(chatId, "Игра окончена, чтобы сыграть ещё раз введите /start");
+            endGame(chatId, session);
         }
     }
 
-    void sendMsg(String chatId, String msg) {
-        SendMessage sendMessage = new SendMessage(chatId, msg);
+    private void endGame(Long chatId, GameSession session) {
+        session.isPlaying = false;
+        String scoreMessage = "Ваш счёт: " + session.playerScore + " Счёт крупье: " + session.dealerScore;
+        if (session.dealerScore > 21 || session.playerScore <= 21 && session.playerScore > session.dealerScore) {
+            sendMsg(chatId, "Вы победили! " + scoreMessage);
+        } else if (session.dealerScore == session.playerScore) {
+            sendMsg(chatId, "Ничья! " + scoreMessage);
+        } else {
+            sendMsg(chatId, "Победил крупье! " + scoreMessage);
+        }
+        sendMsg(chatId, "Игра окончена, чтобы сыграть ещё раз, введите /start");
+    }
+
+    private void sendMsg(Long chatId, String msg) {
+        SendMessage sendMessage = new SendMessage(chatId.toString(), msg);
         try {
             execute(sendMessage);
         } catch (TelegramApiException e) {
